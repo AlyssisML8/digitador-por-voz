@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Calificador de Planilla (Escala 0 - 100)</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
+  <style>
+    :root { --primary: #2563eb; --success: #16a34a; --danger: #dc2626; --bg: #f8fafc; }
+    body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); margin: 0; padding: 12px; }
+    .card { max-width: 650px; margin: 0 auto; background: white; padding: 18px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.06); }
+    h2 { margin: 0 0 12px 0; color: #0f172a; text-align: center; font-size: 1.25rem; }
+    .control-group { margin-bottom: 12px; display: flex; flex-direction: column; gap: 4px; }
+    label { font-weight: bold; font-size: 0.9rem; color: #334155; }
+    select, input[type="file"] { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #cbd5e1; font-size: 1rem; box-sizing: border-box; }
+    
+    .modo-selector { display: flex; gap: 8px; margin: 10px 0; }
+    .modo-btn { flex: 1; padding: 10px; font-size: 0.9rem; border: 2px solid #cbd5e1; border-radius: 8px; background: white; cursor: pointer; font-weight: bold; }
+    .modo-btn.active { border-color: var(--primary); background: #eff6ff; color: var(--primary); }
+
+    .btn { display: block; width: 100%; padding: 12px; font-size: 1rem; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; margin-top: 8px; }
+    .btn-mic { background: var(--danger); color: white; }
+    .btn-mic.active { background: #475569; }
+    .btn-save { background: var(--success); color: white; }
+
+    .status-box { background: #f1f5f9; border-left: 4px solid var(--primary); padding: 10px; border-radius: 6px; margin: 12px 0; font-size: 0.9rem; }
+    .error-box { background: #fee2e2; border-left: 4px solid var(--danger); color: #991b1b; padding: 10px; border-radius: 6px; margin: 10px 0; font-size: 0.85rem; display: none; }
+    
+    .table-container { max-height: 380px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 8px; margin-top: 10px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+    th { position: sticky; top: 0; background: #f8fafc; padding: 8px; text-align: left; border-bottom: 2px solid #cbd5e1; }
+    td { padding: 6px 8px; border-bottom: 1px solid #f1f5f9; }
+    .nota-input { width: 50px; padding: 4px; border: 1px solid #ccc; border-radius: 4px; text-align: center; font-weight: bold; }
+    .row-updated { background: #dcfce7 !important; transition: background 0.3s; }
+  </style>
+</head>
+<body>
+
+<div class="card">
+  <h2>Planilla (Escala 0 a 100)</h2>
+
+  <div id="errorBanner" class="error-box"></div>
+
+  <div id="pantallaCarga">
+    <div class="control-group">
+      <label>1. Cargar Planilla (.xlsx):</label>
+      <input type="file" id="archivoExcel" accept=".xlsx" />
+    </div>
+  </div>
+
+  <div id="pantallaTrabajo" style="display:none;">
+    <div class="control-group">
+      <label>Grado:</label>
+      <select id="selectGrado" onchange="cambiarGrado()"></select>
+    </div>
+
+    <label>Materia activa a dictar:</label>
+    <div class="modo-selector">
+      <button class="modo-btn active" id="btnModoLite" onclick="setModo('lite')">📖 Literatura</button>
+      <button class="modo-btn" id="btnModoGra" onclick="setModo('gra')">✍️ Gramática</button>
+      <button class="modo-btn" id="btnModoAmbas" onclick="setModo('ambas')">Ambas (ej. 85 y 90)</button>
+    </div>
+
+    <button id="btnMic" class="btn btn-mic" onclick="alternarMicrofono()">🎙️ Iniciar Micrófono</button>
+    <button class="btn btn-save" onclick="guardarExcel()">💾 Descargar Excel con Notas</button>
+
+    <div class="status-box">
+      <div><strong>Escuchado:</strong> <span id="audioDetectado" style="color: #64748b; font-style: italic;">Esperando audio...</span></div>
+      <div id="resultadoAccion" style="margin-top: 5px; font-weight: bold; color: #0369a1;">Presiona Iniciar Micrófono.</div>
+    </div>
+
+    <div class="table-container">
+      <table>
+        <thead>
+          <tr>
+            <th>No</th>
+            <th>Estudiante</th>
+            <th style="width: 55px;">Gra</th>
+            <th style="width: 55px;">Lite</th>
+          </tr>
+        </thead>
+        <tbody id="listaEstudiantes"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+  let workbook = null;
+  let worksheet = null;
+  let colGra = 21;  // Columna U
+  let colLite = 23; // Columna W
+  let estudiantesPorGrado = {};
+  let recognition = null;
+  let escuchando = false;
+  let modoActual = 'lite';
+
+  // 1. CARGA DEL ARCHIVO
+  document.getElementById('archivoExcel').addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    try {
+      const buffer = await file.arrayBuffer();
+      workbook = new ExcelJS.Workbook();
+      await workbook.xlsx.load(buffer);
+      worksheet = workbook.worksheets[0];
+
+      mapearPlanilla();
+      llenarSelectorGrados();
+
+      document.getElementById('pantallaCarga').style.display = 'none';
+      document.getElementById('pantallaTrabajo').style.display = 'block';
+      configurarVoz();
+    } catch (err) {
+      mostrarError("Error al cargar el Excel: " + err.message);
+    }
+  });
+
+  function mapearPlanilla() {
+    estudiantesPorGrado = {};
+
+    worksheet.eachRow((row, rowNumber) => {
+      const grado = (row.getCell(1).value || '').toString().trim();
+      const numEst = (row.getCell(3).value || '').toString().trim();
+      const nombre = (row.getCell(4).value || '').toString().trim();
+
+      if (grado && numEst && nombre && !isNaN(numEst)) {
+        if (!estudiantesPorGrado[grado]) estudiantesPorGrado[grado] = [];
+
+        estudiantesPorGrado[grado].push({
+          fila: rowNumber,
+          no: numEst,
+          nombreOriginal: nombre,
+          nombreNorm: normalizar(nombre),
+          gra: row.getCell(colGra).value ?? '',
+          lite: row.getCell(colLite).value ?? ''
+        });
+      }
+    });
+  }
+
+  function llenarSelectorGrados() {
+    const selector = document.getElementById('selectGrado');
+    selector.innerHTML = '';
+    Object.keys(estudiantesPorGrado).forEach(g => {
+      const opt = document.createElement('option');
+      opt.value = g;
+      opt.innerText = `${g} (${estudiantesPorGrado[g].length} estudiantes)`;
+      selector.appendChild(opt);
+    });
+    cambiarGrado();
+  }
+
+  function setModo(modo) {
+    modoActual = modo;
+    document.getElementById('btnModoLite').classList.toggle('active', modo === 'lite');
+    document.getElementById('btnModoGra').classList.toggle('active', modo === 'gra');
+    document.getElementById('btnModoAmbas').classList.toggle('active', modo === 'ambas');
+  }
+
+  function cambiarGrado() {
+    const grado = document.getElementById('selectGrado').value;
+    const alumnos = estudiantesPorGrado[grado] || [];
+    const tbody = document.getElementById('listaEstudiantes');
+    tbody.innerHTML = '';
+
+    alumnos.forEach((est) => {
+      const tr = document.createElement('tr');
+      tr.id = `fila-${est.fila}`;
+      tr.innerHTML = `
+        <td>${est.no}</td>
+        <td>${est.nombreOriginal}</td>
+        <td><input class="nota-input" id="g-${est.fila}" value="${est.gra}" onchange="editarManual(${est.fila}, 'gra', this.value)"></td>
+        <td><input class="nota-input" id="l-${est.fila}" value="${est.lite}" onchange="editarManual(${est.fila}, 'lite', this.value)"></td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function editarManual(fila, materia, val) {
+    const num = val === '' ? null : parseFloat(val);
+    const grado = document.getElementById('selectGrado').value;
+    const est = estudiantesPorGrado[grado].find(e => e.fila === fila);
+
+    if (materia === 'gra') {
+      worksheet.getCell(fila, colGra).value = num;
+      if (est) est.gra = num ?? '';
+    } else {
+      worksheet.getCell(fila, colLite).value = num;
+      if (est) est.lite = num ?? '';
+    }
+  }
+
+  // 2. PARSER DE NÚMEROS EN ESPAÑOL (0 a 100)
+  function convertirPalabrasANumeros(frase) {
+    let t = normalizar(frase);
+
+    const decenas = {
+      'treinta': 30, 'cuarenta': 40, 'cincuenta': 50,
+      'sesenta': 60, 'setenta': 70, 'ochenta': 80, 'noventa': 90
+    };
+    const unidades = {
+      'uno': 1, 'dos': 2, 'tres': 3, 'cuatro': 4, 'cinco': 5,
+      'seis': 6, 'siete': 7, 'ocho': 8, 'nueve': 9
+    };
+    const especiales = {
+      'cien': 100, 'ciento': 100,
+      'diez': 10, 'once': 11, 'doce': 12, 'trece': 13, 'catorce': 14, 'quince': 15,
+      'dieciseis': 16, 'diecisiete': 17, 'dieciocho': 18, 'diecinueve': 19,
+      'veinte': 20, 'veintiuno': 21, 'veintidos': 22, 'veintitres': 23, 'veinticuatro': 24,
+      'veinticinco': 25, 'veintiseis': 26, 'veintisiete': 27, 'veintiocho': 28, 'veintinueve': 29
+    };
+
+    // "ochenta y cinco" -> 85
+    for (const [dec, valDec] of Object.entries(decenas)) {
+      for (const [uni, valUni] of Object.entries(unidades)) {
+        const reg = new RegExp(`\\b${dec}\\s+y\\s+${uni}\\b`, 'g');
+        t = t.replace(reg, (valDec + valUni).toString());
+      }
+    }
+
+    // Decenas solas: "ochenta" -> 80
+    for (const [dec, valDec] of Object.entries(decenas)) {
+      t = t.replace(new RegExp(`\\b${dec}\\b`, 'g'), valDec.toString());
+    }
+
+    // Especiales: "quince" -> 15, "veinticinco" -> 25, "cien" -> 100
+    for (const [esp, valEsp] of Object.entries(especiales)) {
+      t = t.replace(new RegExp(`\\b${esp}\\b`, 'g'), valEsp.toString());
+    }
+
+    // Decimales si dice "punto", "coma" o "con" (ej: "85 punto 5" -> 85.5)
+    t = t.replace(/(\d+)\s*(?:con|punto|coma)\s*(\d+)/g, '$1.$2');
+
+    return t;
+  }
+
+  // 3. RECONOCIMIENTO Y ASIGNACIÓN
+  function configurarVoz() {
+    const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!Speech) {
+      mostrarError("Navegador no compatible. Abre con Google Chrome.");
+      return;
+    }
+
+    recognition = new Speech();
+    recognition.lang = 'es-CO';
+    recognition.continuous = true;
+    recognition.interimResults = false;
+
+    recognition.onresult = (e) => {
+      const transcript = e.results[e.results.length - 1][0].transcript;
+      procesarDictado(transcript);
+    };
+
+    recognition.onerror = (e) => {
+      console.warn("Speech error:", e.error);
+      if (e.error === 'not-allowed') {
+        mostrarError("Micrófono bloqueado. Recuerda abrir la web a través de HTTPS (ej. Netlify Drop).");
+        pararMicrofonoVisual();
+      }
+    };
+
+    recognition.onend = () => {
+      if (escuchando) {
+        try { recognition.start(); } catch (err) {}
+      }
+    };
+  }
+
+  function alternarMicrofono() {
+    if (!recognition) return;
+
+    if (!escuchando) {
+      try {
+        recognition.start();
+        escuchando = true;
+        const btn = document.getElementById('btnMic');
+        btn.innerText = "🛑 Pausar Micrófono";
+        btn.classList.add('active');
+        document.getElementById('resultadoAccion').innerText = "Escuchando... Di alumno y nota (ej. Samuel Becerra 85).";
+      } catch (err) {
+        console.warn(err);
+      }
+    } else {
+      pararMicrofonoVisual();
+    }
+  }
+
+  function pararMicrofonoVisual() {
+    escuchando = false;
+    try { recognition.stop(); } catch (err) {}
+    const btn = document.getElementById('btnMic');
+    btn.innerText = "🎙️ Iniciar Micrófono";
+    btn.classList.remove('active');
+  }
+
+  function procesarDictado(fraseOriginal) {
+    document.getElementById('audioDetectado').innerText = `"${fraseOriginal}"`;
+
+    const texto = convertirPalabrasANumeros(fraseOriginal);
+
+    // Extraer números válidos de 0 a 100 (enteros o con decimal)
+    const matches = texto.match(/\b(100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)\b/g);
+    const numeros = (matches || []).map(n => parseFloat(n)).filter(n => n >= 0 && n <= 100);
+
+    // Retirar números y conectores para aislar el nombre
+    let nombreHablado = texto
+      .replace(/\b(100|[1-9]?\d(?:\.\d+)?)\b/g, '')
+      .replace(/(literatura|gramatica|lite|gra|nota|saco|tiene|para|con|de|el|la)\b/g, '')
+      .trim();
+
+    const gradoActual = document.getElementById('selectGrado').value;
+    const alumnos = estudiantesPorGrado[gradoActual] || [];
+    const est = buscarEstudiante(nombreHablado, alumnos);
+
+    if (!est) {
+      document.getElementById('resultadoAccion').innerText = `⚠️ No encontré a: "${nombreHablado}" en ${gradoActual}.`;
+      return;
+    }
+
+    if (numeros.length === 0) {
+      document.getElementById('resultadoAccion').innerText = `⚠️ Encontré a ${est.nombreOriginal}, pero no entendí la nota (0-100).`;
+      return;
+    }
+
+    if (modoActual === 'lite') {
+      aplicarNota(est, 'lite', numeros[0]);
+    } else if (modoActual === 'gra') {
+      aplicarNota(est, 'gra', numeros[0]);
+    } else if (modoActual === 'ambas') {
+      if (numeros.length >= 2) {
+        aplicarNota(est, 'lite', numeros[0]);
+        aplicarNota(est, 'gra', numeros[1]);
+      } else {
+        document.getElementById('resultadoAccion').innerText = `⚠️ En modo 'Ambas' di dos notas (ej. 85 y 90).`;
+        return;
+      }
+    }
+
+    // Respuesta visual
+    const filaElem = document.getElementById(`fila-${est.fila}`);
+    filaElem.classList.add('row-updated');
+    filaElem.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    setTimeout(() => filaElem.classList.remove('row-updated'), 2000);
+
+    document.getElementById('resultadoAccion').innerText = 
+      `✅ ${est.nombreOriginal} → ` +
+      (modoActual === 'lite' ? `Lit: ${numeros[0]}` : 
+       modoActual === 'gra' ? `Gram: ${numeros[0]}` : 
+       `Lit: ${numeros[0]}, Gram: ${numeros[1]}`);
+  }
+
+  function aplicarNota(est, materia, valor) {
+    if (materia === 'lite') {
+      est.lite = valor;
+      worksheet.getCell(est.fila, colLite).value = valor;
+      document.getElementById(`l-${est.fila}`).value = valor;
+    } else {
+      est.gra = valor;
+      worksheet.getCell(est.fila, colGra).value = valor;
+      document.getElementById(`g-${est.fila}`).value = valor;
+    }
+  }
+
+  function buscarEstudiante(texto, alumnos) {
+    if (!texto || texto.length < 3) return null;
+    const palabras = texto.split(/\s+/).filter(w => w.length > 2);
+
+    let mejor = null;
+    let maxPuntos = 0;
+
+    for (const al of alumnos) {
+      let puntos = 0;
+      for (const p of palabras) {
+        if (al.nombreNorm.includes(p)) puntos++;
+      }
+      if (puntos > maxPuntos) {
+        maxPuntos = puntos;
+        mejor = al;
+      }
+    }
+    return maxPuntos >= 1 ? mejor : null;
+  }
+
+  function normalizar(txt) {
+    return (txt || '').toString().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+  }
+
+  function mostrarError(txt) {
+    const b = document.getElementById('errorBanner');
+    b.innerText = txt;
+    b.style.display = 'block';
+  }
+
+  // 4. DESCARGAR PLANILLA ACTUALIZADA
+  async function guardarExcel() {
+    const buffer = await workbook.xlsx.writeBuffer();
+    const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = "planilla de notas -DOCENTES 3er periodo_CALIFICADO.xlsx";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+</script>
+
+</body>
+</html>
