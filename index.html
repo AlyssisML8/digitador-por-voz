@@ -22,6 +22,7 @@
     .btn-mic { background: var(--danger); color: white; }
     .btn-mic.active { background: #475569; }
     .btn-save { background: var(--success); color: white; }
+    .btn-clear { background: transparent; color: #64748b; font-size: 0.8rem; border: 1px dashed #cbd5e1; margin-top: 15px; }
 
     .status-box { background: #f1f5f9; border-left: 4px solid var(--primary); padding: 10px; border-radius: 6px; margin: 12px 0; font-size: 0.9rem; }
     .error-box { background: #fee2e2; border-left: 4px solid var(--danger); color: #991b1b; padding: 10px; border-radius: 6px; margin: 10px 0; font-size: 0.85rem; display: none; }
@@ -82,6 +83,8 @@
         <tbody id="listaEstudiantes"></tbody>
       </table>
     </div>
+
+    <button class="btn btn-clear" onclick="limpiarProgreso()">🗑️ Borrar notas guardadas en memoria local</button>
   </div>
 </div>
 
@@ -95,7 +98,33 @@
   let escuchando = false;
   let modoActual = 'lite';
 
-  // 1. CARGA DEL ARCHIVO
+  const STORAGE_KEY = 'notas_planilla_cache';
+
+  // Obtener caché local { 'codigo_estudiante': { gra: 85, lite: 90 } }
+  function obtenerCache() {
+    try {
+      return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+    } catch {
+      return {};
+    }
+  }
+
+  function guardarEnCache(codigo, materia, valor) {
+    const cache = obtenerCache();
+    if (!cache[codigo]) cache[codigo] = {};
+    cache[codigo][materia] = valor;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cache));
+  }
+
+  function limpiarProgreso() {
+    if (confirm("¿Estás seguro de que deseas borrar todas las notas guardadas en memoria?")) {
+      localStorage.removeItem(STORAGE_KEY);
+      alert("Memoria borrada. Vuelve a cargar el archivo para iniciar desde cero.");
+      location.reload();
+    }
+  }
+
+  // 1. CARGA DEL ARCHIVO Y RESTAURACIÓN DESDE LOCALSTORAGE
   document.getElementById('archivoExcel').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -106,38 +135,67 @@
       await workbook.xlsx.load(buffer);
       worksheet = workbook.worksheets[0];
 
-      mapearPlanilla();
+      const notasRestauradas = mapearPlanillaYRestaurar();
       llenarSelectorGrados();
 
       document.getElementById('pantallaCarga').style.display = 'none';
       document.getElementById('pantallaTrabajo').style.display = 'block';
+
+      if (notasRestauradas > 0) {
+        document.getElementById('resultadoAccion').innerText = 
+          `🔄 Se restauraron ${notasRestauradas} notas guardadas anteriormente.`;
+      }
+
       configurarVoz();
     } catch (err) {
       mostrarError("Error al cargar el Excel: " + err.message);
     }
   });
 
-  function mapearPlanilla() {
+  function mapearPlanillaYRestaurar() {
     estudiantesPorGrado = {};
+    const cache = obtenerCache();
+    let contadorRestauradas = 0;
 
     worksheet.eachRow((row, rowNumber) => {
       const grado = (row.getCell(1).value || '').toString().trim();
+      const codigo = (row.getCell(2).value || '').toString().trim();
       const numEst = (row.getCell(3).value || '').toString().trim();
       const nombre = (row.getCell(4).value || '').toString().trim();
 
-      if (grado && numEst && nombre && !isNaN(numEst)) {
+      if (grado && codigo && numEst && nombre && !isNaN(numEst)) {
         if (!estudiantesPorGrado[grado]) estudiantesPorGrado[grado] = [];
+
+        // Valor original del Excel o restaurado de localStorage
+        let valGra = row.getCell(colGra).value ?? '';
+        let valLite = row.getCell(colLite).value ?? '';
+
+        if (cache[codigo]) {
+          if (cache[codigo].gra !== undefined) {
+            valGra = cache[codigo].gra;
+            row.getCell(colGra).value = valGra;
+            contadorRestauradas++;
+          }
+          if (cache[codigo].lite !== undefined) {
+            valLite = cache[codigo].lite;
+            row.getCell(colLite).value = valLite;
+            contadorRestauradas++;
+          }
+        }
 
         estudiantesPorGrado[grado].push({
           fila: rowNumber,
+          codigo: codigo,
           no: numEst,
           nombreOriginal: nombre,
           nombreNorm: normalizar(nombre),
-          gra: row.getCell(colGra).value ?? '',
-          lite: row.getCell(colLite).value ?? ''
+          gra: valGra,
+          lite: valLite
         });
       }
     });
+
+    return contadorRestauradas;
   }
 
   function llenarSelectorGrados() {
@@ -171,14 +229,14 @@
       tr.innerHTML = `
         <td>${est.no}</td>
         <td>${est.nombreOriginal}</td>
-        <td><input class="nota-input" id="g-${est.fila}" value="${est.gra}" onchange="editarManual(${est.fila}, 'gra', this.value)"></td>
-        <td><input class="nota-input" id="l-${est.fila}" value="${est.lite}" onchange="editarManual(${est.fila}, 'lite', this.value)"></td>
+        <td><input class="nota-input" id="g-${est.fila}" value="${est.gra}" onchange="editarManual(${est.fila}, '${est.codigo}', 'gra', this.value)"></td>
+        <td><input class="nota-input" id="l-${est.fila}" value="${est.lite}" onchange="editarManual(${est.fila}, '${est.codigo}', 'lite', this.value)"></td>
       `;
       tbody.appendChild(tr);
     });
   }
 
-  function editarManual(fila, materia, val) {
+  function editarManual(fila, codigo, materia, val) {
     const num = val === '' ? null : parseFloat(val);
     const grado = document.getElementById('selectGrado').value;
     const est = estudiantesPorGrado[grado].find(e => e.fila === fila);
@@ -190,6 +248,9 @@
       worksheet.getCell(fila, colLite).value = num;
       if (est) est.lite = num ?? '';
     }
+
+    // Persistir edición manual
+    guardarEnCache(codigo, materia, num);
   }
 
   // 2. PARSER DE NÚMEROS EN ESPAÑOL (0 a 100)
@@ -212,7 +273,6 @@
       'veinticinco': 25, 'veintiseis': 26, 'veintisiete': 27, 'veintiocho': 28, 'veintinueve': 29
     };
 
-    // "ochenta y cinco" -> 85
     for (const [dec, valDec] of Object.entries(decenas)) {
       for (const [uni, valUni] of Object.entries(unidades)) {
         const reg = new RegExp(`\\b${dec}\\s+y\\s+${uni}\\b`, 'g');
@@ -220,19 +280,15 @@
       }
     }
 
-    // Decenas solas: "ochenta" -> 80
     for (const [dec, valDec] of Object.entries(decenas)) {
       t = t.replace(new RegExp(`\\b${dec}\\b`, 'g'), valDec.toString());
     }
 
-    // Especiales: "quince" -> 15, "veinticinco" -> 25, "cien" -> 100
     for (const [esp, valEsp] of Object.entries(especiales)) {
       t = t.replace(new RegExp(`\\b${esp}\\b`, 'g'), valEsp.toString());
     }
 
-    // Decimales si dice "punto", "coma" o "con" (ej: "85 punto 5" -> 85.5)
     t = t.replace(/(\d+)\s*(?:con|punto|coma)\s*(\d+)/g, '$1.$2');
-
     return t;
   }
 
@@ -257,7 +313,7 @@
     recognition.onerror = (e) => {
       console.warn("Speech error:", e.error);
       if (e.error === 'not-allowed') {
-        mostrarError("Micrófono bloqueado. Recuerda abrir la web a través de HTTPS (ej. Netlify Drop).");
+        mostrarError("Micrófono bloqueado. Recuerda abrir la web a través de HTTPS o localhost.");
         pararMicrofonoVisual();
       }
     };
@@ -301,11 +357,9 @@
 
     const texto = convertirPalabrasANumeros(fraseOriginal);
 
-    // Extraer números válidos de 0 a 100 (enteros o con decimal)
     const matches = texto.match(/\b(100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)\b/g);
     const numeros = (matches || []).map(n => parseFloat(n)).filter(n => n >= 0 && n <= 100);
 
-    // Retirar números y conectores para aislar el nombre
     let nombreHablado = texto
       .replace(/\b(100|[1-9]?\d(?:\.\d+)?)\b/g, '')
       .replace(/(literatura|gramatica|lite|gra|nota|saco|tiene|para|con|de|el|la)\b/g, '')
@@ -339,7 +393,6 @@
       }
     }
 
-    // Respuesta visual
     const filaElem = document.getElementById(`fila-${est.fila}`);
     filaElem.classList.add('row-updated');
     filaElem.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -362,6 +415,8 @@
       worksheet.getCell(est.fila, colGra).value = valor;
       document.getElementById(`g-${est.fila}`).value = valor;
     }
+    // Autoguardado en localStorage
+    guardarEnCache(est.codigo, materia, valor);
   }
 
   function buscarEstudiante(texto, alumnos) {
