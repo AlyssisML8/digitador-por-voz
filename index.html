@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Calificador de Planilla (Escala 0 - 100)</title>
+  <title>Calificador Fonético (Escala 0 - 100)</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.3.0/exceljs.min.js"></script>
   <style>
     :root { --primary: #2563eb; --success: #16a34a; --danger: #dc2626; --bg: #f8fafc; }
@@ -100,7 +100,56 @@
 
   const STORAGE_KEY = 'notas_planilla_cache';
 
-  // Obtener caché local { 'codigo_estudiante': { gra: 85, lite: 90 } }
+  // --- MOTOR FONÉTICO ESPAÑOL ---
+  function normalizarFonetica(texto) {
+    if (!texto) return '';
+    let s = texto.toLowerCase()
+      .normalize("NFD").replace(/[\u0300-\u036f]/g, "") // quita tildes
+      .replace(/[^a-z0-9\s]/g, "");                     // quita puntuación
+
+    // 1. Yeísmo: ll -> y
+    s = s.replace(/ll/g, 'y');
+    // 2. Betacismo: v -> b
+    s = s.replace(/v/g, 'b');
+    // 3. Seseo: z -> s, ce/ci -> se/si
+    s = s.replace(/z/g, 's');
+    s = s.replace(/c(?=[ei])/g, 's');
+    // 4. K, qu, c fuerte -> k
+    s = s.replace(/qu/g, 'k');
+    s = s.replace(/c/g, 'k');
+    // 5. Ge/Gi -> Je/Ji
+    s = s.replace(/g(?=[ei])/g, 'j');
+    // 6. H muda
+    s = s.replace(/h/g, '');
+    // 7. Simplificar consonantes dobles (nn -> n, tt -> t, etc.)
+    s = s.replace(/([a-z])\1+/g, '$1');
+    // 8. Tratamiento de 'y' vocálica (Arianny -> ariani)
+    s = s.replace(/y(?![aeiou])/g, 'i');
+
+    return s.trim();
+  }
+
+  // Distancia de Levenshtein para medir cercanía entre palabras
+  function distanciaLevenshtein(a, b) {
+    const m = a.length, n = b.length;
+    const d = [];
+    for (let i = 0; i <= m; i++) d[i] = [i];
+    for (let j = 0; j <= n; j++) d[0][j] = j;
+
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        const costo = a[i - 1] === b[j - 1] ? 0 : 1;
+        d[i][j] = Math.min(
+          d[i - 1][j] + 1,
+          d[i][j - 1] + 1,
+          d[i - 1][j - 1] + costo
+        );
+      }
+    }
+    return d[m][n];
+  }
+
+  // --- PERSISTENCIA LOCALSTORAGE ---
   function obtenerCache() {
     try {
       return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
@@ -119,12 +168,12 @@
   function limpiarProgreso() {
     if (confirm("¿Estás seguro de que deseas borrar todas las notas guardadas en memoria?")) {
       localStorage.removeItem(STORAGE_KEY);
-      alert("Memoria borrada. Vuelve a cargar el archivo para iniciar desde cero.");
+      alert("Memoria borrada.");
       location.reload();
     }
   }
 
-  // 1. CARGA DEL ARCHIVO Y RESTAURACIÓN DESDE LOCALSTORAGE
+  // --- CARGA DE EXCEL ---
   document.getElementById('archivoExcel').addEventListener('change', async (e) => {
     const file = e.target.files[0];
     if (!file) return;
@@ -143,7 +192,7 @@
 
       if (notasRestauradas > 0) {
         document.getElementById('resultadoAccion').innerText = 
-          `🔄 Se restauraron ${notasRestauradas} notas guardadas anteriormente.`;
+          `🔄 Se restauraron ${notasRestauradas} notas guardadas en este dispositivo.`;
       }
 
       configurarVoz();
@@ -166,7 +215,6 @@
       if (grado && codigo && numEst && nombre && !isNaN(numEst)) {
         if (!estudiantesPorGrado[grado]) estudiantesPorGrado[grado] = [];
 
-        // Valor original del Excel o restaurado de localStorage
         let valGra = row.getCell(colGra).value ?? '';
         let valLite = row.getCell(colLite).value ?? '';
 
@@ -188,7 +236,8 @@
           codigo: codigo,
           no: numEst,
           nombreOriginal: nombre,
-          nombreNorm: normalizar(nombre),
+          // Precalculamos las palabras fonéticas para comparación veloz
+          palabrasFoneticas: normalizarFonetica(nombre).split(/\s+/).filter(w => w.length >= 2),
           gra: valGra,
           lite: valLite
         });
@@ -248,14 +297,12 @@
       worksheet.getCell(fila, colLite).value = num;
       if (est) est.lite = num ?? '';
     }
-
-    // Persistir edición manual
     guardarEnCache(codigo, materia, num);
   }
 
-  // 2. PARSER DE NÚMEROS EN ESPAÑOL (0 a 100)
+  // --- PARSER DE NÚMEROS EN PALABRAS ---
   function convertirPalabrasANumeros(frase) {
-    let t = normalizar(frase);
+    let t = frase.toLowerCase();
 
     const decenas = {
       'treinta': 30, 'cuarenta': 40, 'cincuenta': 50,
@@ -279,11 +326,9 @@
         t = t.replace(reg, (valDec + valUni).toString());
       }
     }
-
     for (const [dec, valDec] of Object.entries(decenas)) {
       t = t.replace(new RegExp(`\\b${dec}\\b`, 'g'), valDec.toString());
     }
-
     for (const [esp, valEsp] of Object.entries(especiales)) {
       t = t.replace(new RegExp(`\\b${esp}\\b`, 'g'), valEsp.toString());
     }
@@ -292,7 +337,7 @@
     return t;
   }
 
-  // 3. RECONOCIMIENTO Y ASIGNACIÓN
+  // --- MOTOR DE VOZ ---
   function configurarVoz() {
     const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Speech) {
@@ -311,9 +356,8 @@
     };
 
     recognition.onerror = (e) => {
-      console.warn("Speech error:", e.error);
       if (e.error === 'not-allowed') {
-        mostrarError("Micrófono bloqueado. Recuerda abrir la web a través de HTTPS o localhost.");
+        mostrarError("Micrófono bloqueado. Accede vía HTTPS o localhost.");
         pararMicrofonoVisual();
       }
     };
@@ -335,10 +379,8 @@
         const btn = document.getElementById('btnMic');
         btn.innerText = "🛑 Pausar Micrófono";
         btn.classList.add('active');
-        document.getElementById('resultadoAccion').innerText = "Escuchando... Di alumno y nota (ej. Samuel Becerra 85).";
-      } catch (err) {
-        console.warn(err);
-      }
+        document.getElementById('resultadoAccion').innerText = "Escuchando... Di el alumno y la nota.";
+      } catch (err) {}
     } else {
       pararMicrofonoVisual();
     }
@@ -355,51 +397,70 @@
   function procesarDictado(fraseOriginal) {
     document.getElementById('audioDetectado').innerText = `"${fraseOriginal}"`;
 
-    const texto = convertirPalabrasANumeros(fraseOriginal);
+    const textoNumeros = convertirPalabrasANumeros(fraseOriginal);
 
-    const matches = texto.match(/\b(100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)\b/g);
+    // Extraer notas de 0 a 100
+    const matches = textoNumeros.match(/\b(100(?:\.0+)?|[1-9]?\d(?:\.\d+)?)\b/g);
     const numeros = (matches || []).map(n => parseFloat(n)).filter(n => n >= 0 && n <= 100);
-
-    let nombreHablado = texto
-      .replace(/\b(100|[1-9]?\d(?:\.\d+)?)\b/g, '')
-      .replace(/(literatura|gramatica|lite|gra|nota|saco|tiene|para|con|de|el|la)\b/g, '')
-      .trim();
 
     const gradoActual = document.getElementById('selectGrado').value;
     const alumnos = estudiantesPorGrado[gradoActual] || [];
-    const est = buscarEstudiante(nombreHablado, alumnos);
 
-    if (!est) {
-      document.getElementById('resultadoAccion').innerText = `⚠️ No encontré a: "${nombreHablado}" en ${gradoActual}.`;
+    // 1. ¿DICTÓ POR NÚMERO DE LISTA? (ej: "número 20, 85" o "el 14, 90")
+    let estudiante = null;
+    const matchNumLista = textoNumeros.match(/\b(?:numero|estudiante|no|el)\s+(\d{1,2})\b/);
+    if (matchNumLista) {
+      const numBuscado = matchNumLista[1];
+      estudiante = alumnos.find(a => a.no === numBuscado);
+      // Retiramos el número de lista para que no se confunda con la calificación
+      if (estudiante && numeros.length > 0 && numeros[0] === parseFloat(numBuscado)) {
+        numeros.shift(); 
+      }
+    }
+
+    // 2. SI NO FUE POR NÚMERO, BÚSQUEDA FONÉTICA POR NOMBRE
+    if (!estudiante) {
+      let nombreHablado = textoNumeros
+        .replace(/\b(100|[1-9]?\d(?:\.\d+)?)\b/g, '')
+        .replace(/(literatura|gramatica|lite|gra|nota|saco|tiene|para|con|de|el|la)\b/g, '')
+        .trim();
+
+      estudiante = buscarEstudianteFonetico(nombreHablado, alumnos);
+    }
+
+    if (!estudiante) {
+      document.getElementById('resultadoAccion').innerText = `⚠️ No encontré al alumno en ${gradoActual}.`;
       return;
     }
 
     if (numeros.length === 0) {
-      document.getElementById('resultadoAccion').innerText = `⚠️ Encontré a ${est.nombreOriginal}, pero no entendí la nota (0-100).`;
+      document.getElementById('resultadoAccion').innerText = `⚠️ Encontré a ${estudiante.nombreOriginal}, pero falta la nota.`;
       return;
     }
 
+    // Asignar calificaciones
     if (modoActual === 'lite') {
-      aplicarNota(est, 'lite', numeros[0]);
+      aplicarNota(estudiante, 'lite', numeros[0]);
     } else if (modoActual === 'gra') {
-      aplicarNota(est, 'gra', numeros[0]);
+      aplicarNota(estudiante, 'gra', numeros[0]);
     } else if (modoActual === 'ambas') {
       if (numeros.length >= 2) {
-        aplicarNota(est, 'lite', numeros[0]);
-        aplicarNota(est, 'gra', numeros[1]);
+        aplicarNota(estudiante, 'lite', numeros[0]);
+        aplicarNota(estudiante, 'gra', numeros[1]);
       } else {
         document.getElementById('resultadoAccion').innerText = `⚠️ En modo 'Ambas' di dos notas (ej. 85 y 90).`;
         return;
       }
     }
 
-    const filaElem = document.getElementById(`fila-${est.fila}`);
+    // Animación visual
+    const filaElem = document.getElementById(`fila-${estudiante.fila}`);
     filaElem.classList.add('row-updated');
     filaElem.scrollIntoView({ behavior: 'smooth', block: 'center' });
     setTimeout(() => filaElem.classList.remove('row-updated'), 2000);
 
     document.getElementById('resultadoAccion').innerText = 
-      `✅ ${est.nombreOriginal} → ` +
+      `✅ [No. ${estudiante.no}] ${estudiante.nombreOriginal} → ` +
       (modoActual === 'lite' ? `Lit: ${numeros[0]}` : 
        modoActual === 'gra' ? `Gram: ${numeros[0]}` : 
        `Lit: ${numeros[0]}, Gram: ${numeros[1]}`);
@@ -415,32 +476,52 @@
       worksheet.getCell(est.fila, colGra).value = valor;
       document.getElementById(`g-${est.fila}`).value = valor;
     }
-    // Autoguardado en localStorage
     guardarEnCache(est.codigo, materia, valor);
   }
 
-  function buscarEstudiante(texto, alumnos) {
-    if (!texto || texto.length < 3) return null;
-    const palabras = texto.split(/\s+/).filter(w => w.length > 2);
+  // BUSCADOR FONÉTICO Y DIFUSO
+  function buscarEstudianteFonetico(textoHablado, alumnos) {
+    if (!textoHablado || textoHablado.length < 2) return null;
+    
+    const palabrasDictadas = normalizarFonetica(textoHablado)
+      .split(/\s+/)
+      .filter(w => w.length >= 3);
+
+    if (palabrasDictadas.length === 0) return null;
 
     let mejor = null;
     let maxPuntos = 0;
 
     for (const al of alumnos) {
       let puntos = 0;
-      for (const p of palabras) {
-        if (al.nombreNorm.includes(p)) puntos++;
+
+      for (const pDictada of palabrasDictadas) {
+        for (const pAlumno of al.palabrasFoneticas) {
+          // 1. Coincidencia fonética exacta (ej: buelbas == buelbas, payares == payares, ariani == ariani)
+          if (pAlumno === pDictada) {
+            puntos += 3;
+          } 
+          // 2. Es subcadena
+          else if (pAlumno.includes(pDictada) || pDictada.includes(pAlumno)) {
+            puntos += 2;
+          } 
+          // 3. Diferencia leve por Levenshtein (1 o 2 letras)
+          else {
+            const dist = distanciaLevenshtein(pAlumno, pDictada);
+            if (pAlumno.length > 5 && dist <= 2) puntos += 1.5;
+            else if (dist <= 1) puntos += 1.5;
+          }
+        }
       }
+
       if (puntos > maxPuntos) {
         maxPuntos = puntos;
         mejor = al;
       }
     }
-    return maxPuntos >= 1 ? mejor : null;
-  }
 
-  function normalizar(txt) {
-    return (txt || '').toString().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+    // Debe coincidir razonablemente al menos con una palabra clave
+    return maxPuntos >= 2 ? mejor : null;
   }
 
   function mostrarError(txt) {
@@ -449,7 +530,7 @@
     b.style.display = 'block';
   }
 
-  // 4. DESCARGAR PLANILLA ACTUALIZADA
+  // DESCARGA
   async function guardarExcel() {
     const buffer = await workbook.xlsx.writeBuffer();
     const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
